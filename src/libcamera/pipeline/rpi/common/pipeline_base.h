@@ -171,6 +171,11 @@ public:
 		 * means an infinite timeout (watchdog disabled).
 		 */
 		int cameraTimeoutValue;
+		/*
+		 * The minimum frame duration between the IPA's calls to the
+		 * algorithms themselves (in microseconds).
+		 */
+		float controllerMinFrameDurationUs;
 	};
 
 	Config config_;
