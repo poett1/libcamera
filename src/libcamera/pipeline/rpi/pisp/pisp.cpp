@@ -2303,13 +2303,15 @@ void PiSPCameraData::tryRunPipeline()
 	CfeJob &job = cfeJobQueue_.front();
 
 	/* Take the first request from the queue and action the IPA. */
-	Request *request = requestQueue_.front();
-	ASSERT(request->metadata().empty());
+	currentRequest_ = requestQueue_.front();
+	ASSERT(currentRequest_->metadata().empty());
+	/* xxx pop the queue even for startup frames? */
+	requestQueue_.pop_front();
 
 	/* See if a new ScalerCrop value needs to be applied. */
-	applyScalerCrop(request->controls());
+	applyScalerCrop(currentRequest_->controls());
 
-	fillRequestMetadata(job.sensorControls, request);
+	fillRequestMetadata(job.sensorControls, currentRequest_);
 
 	/* Set our state to say the pipeline is active. */
 	state_ = State::Busy;
@@ -2327,10 +2329,10 @@ void PiSPCameraData::tryRunPipeline()
 	params.buffers.bayer = RPi::MaskBayerData | bayerId;
 	params.buffers.stats = RPi::MaskStats | statsId;
 	params.buffers.embedded = 0;
-	params.ipaContext = requestQueue_.front()->sequence();
+	params.ipaContext = currentRequest_->sequence();
 	params.delayContext = job.delayContext;
 	params.sensorControls = std::move(job.sensorControls);
-	params.requestControls = request->controls();
+	params.requestControls = currentRequest_->controls();
 
 	if (sensorMetadata_) {
 		unsigned int embeddedId =

@@ -884,7 +884,7 @@ void Vc4CameraData::ispOutputDequeue(FrameBuffer *buffer)
 	if (stream == &isp_[Isp::Stats]) {
 		ipa::RPi::ProcessParams params;
 		params.buffers.stats = index | RPi::MaskStats;
-		params.ipaContext = requestQueue_.front()->sequence();
+		params.ipaContext = currentRequest_->sequence();
 		ipa_->processStats(params);
 	} else {
 		/* Any other ISP output can be handed back to the application now. */
@@ -976,13 +976,15 @@ void Vc4CameraData::tryRunPipeline()
 		return;
 
 	/* Take the first request from the queue and action the IPA. */
-	Request *request = requestQueue_.front();
-	ASSERT(request->metadata().empty());
+	currentRequest_ = requestQueue_.front();
+	ASSERT(currentRequest_->metadata().empty());
+	/* xxx pop the queue even for startup frames? */
+	requestQueue_.pop_front();
 
 	/* See if a new ScalerCrop value needs to be applied. */
-	applyScalerCrop(request->controls());
+	applyScalerCrop(currentRequest_->controls());
 
-	fillRequestMetadata(bayerFrame.controls, request);
+	fillRequestMetadata(bayerFrame.controls, currentRequest_);
 
 	/* Set our state to say the pipeline is active. */
 	state_ = State::Busy;
@@ -995,8 +997,8 @@ void Vc4CameraData::tryRunPipeline()
 	ipa::RPi::PrepareParams params;
 	params.buffers.bayer = RPi::MaskBayerData | bayer;
 	params.sensorControls = std::move(bayerFrame.controls);
-	params.requestControls = request->controls();
-	params.ipaContext = request->sequence();
+	params.requestControls = currentRequest_->controls();
+	params.ipaContext = currentRequest_->sequence();
 	params.delayContext = bayerFrame.delayContext;
 	params.buffers.embedded = 0;
 
