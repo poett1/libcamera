@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -131,6 +132,7 @@ public:
 
 	std::deque<Request *> requestQueue_;
 	Request *currentRequest_;
+	std::queue<ControlList> controlsQueue_;
 
 	/* For handling digital zoom. */
 	IPACameraSensorInfo sensorInfo_;
@@ -222,6 +224,7 @@ public:
 	void releaseDevice(Camera *camera) override;
 
 	int queueRequestDevice(Camera *camera, Request *request) override;
+	int queueControlsDevice(Camera *camera, const ControlList &controls) override;
 
 protected:
 	int registerCamera(std::unique_ptr<RPi::CameraData> &cameraData,
