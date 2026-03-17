@@ -976,6 +976,7 @@ void Vc4CameraData::tryRunPipeline()
 		return;
 
 	/* Take the first request from the queue and action the IPA. */
+	ASSERT(!currentRequest_);
 	currentRequest_ = requestQueue_.front();
 	ASSERT(currentRequest_->metadata().empty());
 	/* xxx pop the queue even for startup frames? */
@@ -985,6 +986,9 @@ void Vc4CameraData::tryRunPipeline()
 	applyScalerCrop(currentRequest_->controls());
 
 	fillRequestMetadata(bayerFrame.controls, currentRequest_);
+
+	/* This sorts out synchronisation with the ControlList queue. */
+	handleControlLists(bayerFrame.delayContext);
 
 	/* Set our state to say the pipeline is active. */
 	state_ = State::Busy;

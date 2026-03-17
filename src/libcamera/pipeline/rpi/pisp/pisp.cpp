@@ -2303,6 +2303,7 @@ void PiSPCameraData::tryRunPipeline()
 	CfeJob &job = cfeJobQueue_.front();
 
 	/* Take the first request from the queue and action the IPA. */
+	ASSERT(!currentRequest_);
 	currentRequest_ = requestQueue_.front();
 	ASSERT(currentRequest_->metadata().empty());
 	/* xxx pop the queue even for startup frames? */
@@ -2312,6 +2313,9 @@ void PiSPCameraData::tryRunPipeline()
 	applyScalerCrop(currentRequest_->controls());
 
 	fillRequestMetadata(job.sensorControls, currentRequest_);
+
+	/* This sorts out synchronisation with the ControlList queue. */
+	handleControlLists(job.delayContext);
 
 	/* Set our state to say the pipeline is active. */
 	state_ = State::Busy;
