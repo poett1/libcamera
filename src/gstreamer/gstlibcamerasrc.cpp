@@ -22,6 +22,7 @@
 #include "gstlibcamerasrc.h"
 
 #include <atomic>
+#include <cstdio>
 #include <queue>
 #include <tuple>
 #include <utility>
@@ -141,6 +142,8 @@ struct _GstLibcameraSrc {
 	GstTask *task;
 
 	gchar *camera_name;
+	gchar *sensor_mode;
+	gchar *preferred_pixel_format;
 
 	std::atomic<GstEvent *> pending_eos;
 
@@ -152,6 +155,8 @@ struct _GstLibcameraSrc {
 enum {
 	PROP_0,
 	PROP_CAMERA_NAME,
+	PROP_SENSOR_MODE,
+	PROP_PREFERRED_PIXEL_FORMAT,
 	PROP_LAST
 };
 
@@ -580,6 +585,75 @@ gst_libcamera_create_video_pool(GstLibcameraSrc *self, GstPad *srcpad,
 	return { std::exchange(pool, nullptr), 0 };
 }
 
+static void
+gst_libcamera_src_apply_preferred_pixel_format(GstLibcameraSrc *self,
+					       StreamConfiguration &stream_cfg,
+					       const gchar *preferred_pixel_format)
+{
+	if (!preferred_pixel_format || !preferred_pixel_format[0])
+		return;
+
+	PixelFormat preferred = PixelFormat::fromString(preferred_pixel_format);
+	if (!preferred.isValid()) {
+		GST_WARNING_OBJECT(self,
+				   "Invalid preferred-pixel-format '%s', ignoring",
+				   preferred_pixel_format);
+		return;
+	}
+
+	for (const PixelFormat &candidate : stream_cfg.formats().pixelformats()) {
+		if (candidate == preferred) {
+			stream_cfg.pixelFormat = preferred;
+			GST_WARNING_OBJECT(self,
+				   "preferred-pixel-format='%s' accepted for stream",
+				   preferred_pixel_format);
+			return;
+		}
+	}
+
+	std::string supported_formats;
+	for (const PixelFormat &candidate : stream_cfg.formats().pixelformats()) {
+		if (!supported_formats.empty())
+			supported_formats += ", ";
+		supported_formats += candidate.toString();
+	}
+
+	GST_WARNING_OBJECT(self,
+			   "preferred-pixel-format '%s' is not supported by this stream, ignoring. Supported formats: [%s]",
+			   preferred_pixel_format,
+			   supported_formats.c_str());
+}
+
+static bool
+gst_libcamera_src_parse_sensor_mode(const gchar *sensor_mode,
+				    Size &output_size,
+				    unsigned int &bit_depth,
+				    char &packing)
+{
+	unsigned int width = 0;
+	unsigned int height = 0;
+	unsigned int depth = 0;
+	char p = '\0';
+
+	if (!sensor_mode || !sensor_mode[0])
+		return false;
+
+	int n = std::sscanf(sensor_mode, "%u:%u:%u:%c", &width, &height, &depth, &p);
+	if (n != 4)
+		return false;
+
+	if (width == 0 || height == 0 || depth == 0)
+		return false;
+
+	if (p != 'P' && p != 'U')
+		return false;
+
+	output_size = Size(width, height);
+	bit_depth = depth;
+	packing = p;
+	return true;
+}
+
 /* Must be called with stream_lock held. */
 static bool
 gst_libcamera_src_negotiate(GstLibcameraSrc *self)
@@ -587,12 +661,52 @@ gst_libcamera_src_negotiate(GstLibcameraSrc *self)
 	GstLibcameraSrcState *state = self->state;
 	std::vector<GstVideoTransferFunction> transfer(state->srcpads_.size(),
 						       GST_VIDEO_TRANSFER_UNKNOWN);
+	g_autofree gchar *sensor_mode = nullptr;
+	g_autofree gchar *preferred_pixel_format = nullptr;
+
+	{
+		GLibLocker locker(GST_OBJECT(self));
+		if (self->sensor_mode)
+			sensor_mode = g_strdup(self->sensor_mode);
+		if (self->preferred_pixel_format)
+			preferred_pixel_format = g_strdup(self->preferred_pixel_format);
+	}
+
+	if (sensor_mode && sensor_mode[0]) {
+		Size sensor_size;
+		unsigned int sensor_bit_depth = 0;
+		char sensor_packing = '\0';
+
+		if (!gst_libcamera_src_parse_sensor_mode(sensor_mode,
+							sensor_size,
+							sensor_bit_depth,
+							sensor_packing)) {
+			GST_WARNING_OBJECT(self,
+				   "Invalid sensor-mode '%s' (expected W:H:bit-depth:P|U), ignoring",
+				   sensor_mode);
+		} else {
+			state->config_->sensorConfig = SensorConfiguration();
+			state->config_->sensorConfig->outputSize = sensor_size;
+			state->config_->sensorConfig->bitDepth = sensor_bit_depth;
+			GST_WARNING_OBJECT(self,
+				   "Applied sensor-mode '%s' -> outputSize=%ux%u bitDepth=%u packing=%c",
+				   sensor_mode,
+				   sensor_size.width,
+				   sensor_size.height,
+				   sensor_bit_depth,
+				   sensor_packing);
+		}
+	}
 
 	g_autoptr(GstStructure) element_caps = gst_structure_new_empty("caps");
 
 	for (gsize i = 0; i < state->srcpads_.size(); i++) {
 		GstPad *srcpad = state->srcpads_[i];
 		StreamConfiguration &stream_cfg = state->config_->at(i);
+
+		gst_libcamera_src_apply_preferred_pixel_format(self,
+						       stream_cfg,
+						       preferred_pixel_format);
 
 		/* Retrieve the supported caps. */
 		g_autoptr(GstCaps) filter = gst_libcamera_stream_formats_to_caps(stream_cfg.formats());
@@ -603,6 +717,22 @@ gst_libcamera_src_negotiate(GstLibcameraSrc *self)
 		/* Fixate caps and configure the stream. */
 		caps = gst_caps_make_writable(caps);
 		gst_libcamera_configure_stream_from_caps(stream_cfg, caps, &transfer[i]);
+		/* Re-apply preference in case configure_stream_from_caps() changed it. */
+		gst_libcamera_src_apply_preferred_pixel_format(self,
+						       stream_cfg,
+						       preferred_pixel_format);
+		if (preferred_pixel_format && preferred_pixel_format[0]) {
+			if (stream_cfg.pixelFormat.toString() != preferred_pixel_format) {
+				GST_WARNING_OBJECT(self,
+					   "Requested preferred-pixel-format='%s' but selected stream pixel format is '%s' before validate()",
+					   preferred_pixel_format,
+					   stream_cfg.pixelFormat.toString().c_str());
+			} else {
+				GST_WARNING_OBJECT(self,
+					   "Negotiated stream pixel format '%s' matches preferred-pixel-format",
+					   stream_cfg.pixelFormat.toString().c_str());
+			}
+		}
 		gst_libcamera_get_framerate_from_caps(caps, element_caps);
 	}
 
@@ -623,6 +753,24 @@ gst_libcamera_src_negotiate(GstLibcameraSrc *self)
 		return false;
 	}
 
+	if (preferred_pixel_format && preferred_pixel_format[0]) {
+		for (gsize i = 0; i < state->srcpads_.size(); i++) {
+			const StreamConfiguration &stream_cfg = state->config_->at(i);
+			if (stream_cfg.pixelFormat.toString() != preferred_pixel_format) {
+				GST_WARNING_OBJECT(self,
+					   "After configure(): preferred-pixel-format='%s' but actual stream[%zu] pixel format is '%s'",
+					   preferred_pixel_format,
+					   i,
+					   stream_cfg.pixelFormat.toString().c_str());
+			} else {
+				GST_WARNING_OBJECT(self,
+					   "After configure(): stream[%zu] pixel format is '%s' (as requested)",
+					   i,
+					   stream_cfg.pixelFormat.toString().c_str());
+			}
+		}
+	}
+
 	/* Check frame duration bounds within controls::FrameDurationLimits */
 	gst_libcamera_clamp_and_set_frameduration(state->initControls_,
 						  state->cam_->controls(), element_caps);
@@ -639,8 +787,13 @@ gst_libcamera_src_negotiate(GstLibcameraSrc *self)
 		gst_libcamera_framerate_to_caps(caps, element_caps);
 
 		if (status == CameraConfiguration::Adjusted &&
-		    !gst_pad_peer_query_accept_caps(srcpad, caps))
-			return false;
+			!gst_pad_peer_query_accept_caps(srcpad, caps)) {
+			gchar *caps_str = gst_caps_to_string(caps);
+			GST_WARNING_OBJECT(self,
+				   "Adjusted stream caps %s not accepted by peer",
+				   caps_str);
+			g_free(caps_str);
+		}
 
 		if (!gst_pad_push_event(srcpad, gst_event_new_caps(caps)))
 			return false;
@@ -934,6 +1087,14 @@ gst_libcamera_src_set_property(GObject *object, guint prop_id,
 		g_free(self->camera_name);
 		self->camera_name = g_value_dup_string(value);
 		break;
+	case PROP_SENSOR_MODE:
+		g_free(self->sensor_mode);
+		self->sensor_mode = g_value_dup_string(value);
+		break;
+	case PROP_PREFERRED_PIXEL_FORMAT:
+		g_free(self->preferred_pixel_format);
+		self->preferred_pixel_format = g_value_dup_string(value);
+		break;
 	default:
 		if (!state->controls_.setProperty(prop_id - PROP_LAST, value, pspec))
 			G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -952,6 +1113,12 @@ gst_libcamera_src_get_property(GObject *object, guint prop_id, GValue *value,
 	switch (prop_id) {
 	case PROP_CAMERA_NAME:
 		g_value_set_string(value, self->camera_name);
+		break;
+	case PROP_SENSOR_MODE:
+		g_value_set_string(value, self->sensor_mode);
+		break;
+	case PROP_PREFERRED_PIXEL_FORMAT:
+		g_value_set_string(value, self->preferred_pixel_format);
 		break;
 	default:
 		if (!state->controls_.getProperty(prop_id - PROP_LAST, value, pspec))
@@ -1040,6 +1207,8 @@ gst_libcamera_src_finalize(GObject *object)
 	g_clear_object(&self->task);
 	g_mutex_clear(&self->state->lock_);
 	g_free(self->camera_name);
+	g_free(self->sensor_mode);
+	g_free(self->preferred_pixel_format);
 	delete self->state;
 
 	return klass->finalize(object);
@@ -1161,6 +1330,26 @@ gst_libcamera_src_class_init(GstLibcameraSrcClass *klass)
 							     | G_PARAM_READWRITE
 							     | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property(object_class, PROP_CAMERA_NAME, spec);
+
+	spec = g_param_spec_string("sensor-mode", "Sensor Mode",
+				   "Sensor mode as W:H:bit-depth:P|U (example: 1280:800:8:U)."
+				   " Sets CameraConfiguration::sensorConfig outputSize and bitDepth.",
+				   nullptr,
+				   (GParamFlags)(GST_PARAM_MUTABLE_READY
+					     | G_PARAM_CONSTRUCT
+					     | G_PARAM_READWRITE
+					     | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(object_class, PROP_SENSOR_MODE, spec);
+
+	spec = g_param_spec_string("preferred-pixel-format", "Preferred Pixel Format",
+				   "Preferred libcamera pixel format name (for example R8, R10_CSI2P)."
+				   " If unavailable for a stream, it is ignored.",
+				   nullptr,
+				   (GParamFlags)(GST_PARAM_MUTABLE_READY
+					     | G_PARAM_CONSTRUCT
+					     | G_PARAM_READWRITE
+					     | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property(object_class, PROP_PREFERRED_PIXEL_FORMAT, spec);
 
 	GstCameraControls::installProperties(object_class, PROP_LAST);
 }
