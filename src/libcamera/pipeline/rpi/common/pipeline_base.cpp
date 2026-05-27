@@ -878,6 +878,17 @@ int PipelineHandlerBase::registerCamera(std::unique_ptr<RPi::CameraData> &camera
 	data->ipa_->setLensControls.connect(data, &CameraData::setLensControls);
 	data->ipa_->metadataReady.connect(data, &CameraData::metadataReady);
 
+	/*
+	 * Disable the IPA signal to control timeout, when there is a
+	 * user-requested value. We do this here now that the IPA and
+	 * front end device are both initialized. 0 is a valid request
+	 * (infinite timeout), so test against the -1 "no override" default.
+	 */
+	if (data->config_.cameraTimeoutValue >= 0) {
+		data->ipa_->setCameraTimeout.disconnect();
+		data->frontendDevice()->setDequeueTimeout(data->config_.cameraTimeoutValue * 1ms);
+	}
+
 	return 0;
 }
 
@@ -1151,12 +1162,6 @@ int CameraData::loadPipelineConfiguration()
 
 	config_.cameraTimeoutValue =
 		phConfig["camera_timeout_value_ms"].get<int>(config_.cameraTimeoutValue);
-
-	if (config_.cameraTimeoutValue >= 0) {
-		/* Disable the IPA signal to control timeout and set the user requested value. */
-		ipa_->setCameraTimeout.disconnect();
-		frontendDevice()->setDequeueTimeout(config_.cameraTimeoutValue * 1ms);
-	}
 
 	config_.controllerMinFrameDurationUs =
 		phConfig["controller_min_frame_duration_us"].get<double>(config_.controllerMinFrameDurationUs);
