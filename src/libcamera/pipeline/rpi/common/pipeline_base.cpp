@@ -1094,17 +1094,20 @@ bool CameraData::enumerateVideoDevices(MediaLink *link, const std::string &front
 
 int CameraData::loadPipelineConfiguration()
 {
-	config_.cameraTimeoutValue = 0; /* Default: disable watchdog (0=infinite) for trigger mode */
+	/*
+	 * Default: no override. The IPA computes the dequeue timeout from the
+	 * sensor frame durations. A camera_timeout_value_ms entry >= 0 in the
+	 * pipeline config file overrides it; 0 means an infinite timeout
+	 * (disables the watchdog, e.g. for externally triggered sensors).
+	 */
+	config_.cameraTimeoutValue = -1;
+
 	/* Initial configuration of the platform, in case no config file is present */
 	platformPipelineConfigure({});
 
 	char const *configFromEnv = utils::secure_getenv("LIBCAMERA_RPI_CONFIG_FILE");
-	if (!configFromEnv || *configFromEnv == '\0') {
-		/* No config file — apply the default timeout now. */
-		ipa_->setCameraTimeout.disconnect();
-		frontendDevice()->setDequeueTimeout(config_.cameraTimeoutValue * 1ms);
+	if (!configFromEnv || *configFromEnv == '\0')
 		return 0;
-	}
 
 	std::string filename = std::string(configFromEnv);
 	File file(filename);

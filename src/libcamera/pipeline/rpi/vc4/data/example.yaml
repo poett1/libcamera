@@ -33,8 +33,9 @@
                 # the value computed by the pipeline handler based on frame
                 # durations.
                 #
-                # Set this value to 0 to use the pipeline handler computed
-                # timeout value.
+                # Set this value to 0 for an infinite timeout (disables the
+                # dequeue watchdog, e.g. for externally triggered sensors).
+                # Omit the entry to use the pipeline handler computed value.
                 #
                 # "camera_timeout_value_ms": 0,
 

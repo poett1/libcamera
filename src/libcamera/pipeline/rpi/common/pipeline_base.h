@@ -166,7 +166,9 @@ public:
 	struct Config {
 		/*
 		 * Override the camera timeout value calculated by the IPA based
-		 * on frame durations.
+		 * on frame durations. -1 means no override (the IPA-computed
+		 * value is used); >= 0 sets a fixed timeout in ms, where 0
+		 * means an infinite timeout (watchdog disabled).
 		 */
 		int cameraTimeoutValue;
 	};
