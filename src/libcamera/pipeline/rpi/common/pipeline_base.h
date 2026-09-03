@@ -168,7 +168,7 @@ public:
 		 * Override the camera timeout value calculated by the IPA based
 		 * on frame durations.
 		 */
-		unsigned int cameraTimeoutValue;
+		int cameraTimeoutValue;
 	};
 
 	Config config_;
