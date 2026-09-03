@@ -46,7 +46,7 @@ public:
 	CamHelperImxVCCamera();
 	uint32_t gainCode(double gain) const override;
 	double gain(uint32_t gainCode) const override;
-	unsigned int mistrustFramesModeSwitch() const override;
+	unsigned int mistrustMetadataModeSwitch() const override;
 	bool sensorEmbeddedDataPresent() const override;
 
 	std::pair<uint32_t, uint32_t>
@@ -96,7 +96,7 @@ double CamHelperImxVCCamera::gain(uint32_t gainCode) const
 	return std::pow(10.0, static_cast<double>(gainCode) / 20000.0);
 }
 
-unsigned int CamHelperImxVCCamera::mistrustFramesModeSwitch() const
+unsigned int CamHelperImxVCCamera::mistrustMetadataModeSwitch() const
 {
 	/*
 	 * For reasons unknown, we do occasionally get a bogus metadata frame
