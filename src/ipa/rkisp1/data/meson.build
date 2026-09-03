@@ -9,6 +9,7 @@ conf_files = files([
     'ov5695.yaml',
     'ov8858.yaml',
     'uncalibrated.yaml',
+    'vc_mipi_camera.yaml'
 ])
 
 install_data(conf_files,
