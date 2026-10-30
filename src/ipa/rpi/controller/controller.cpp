@@ -74,8 +74,13 @@ const std::map<std::string, Controller::HardwareConfig> &hardwareConfigMap()
 				* single scanline, there could still be loss. This
 				* could happen using 4 lanes at 1.5Gbps at 10bpp with
 				* frames wider than ~16,000 pixels.
+				*
+				* Kept at 380 in this fork: upstream raised it to 390
+				* in v0.7.2+rpt20261009, but a 2048-pixel line at
+				* 390Mpix/s overruns the front end on a Pi 5 with an
+				* IMX900 (almost every frame torn, silently).
 				*/
-				.minPixelProcessingTime = 1.0us / 390,
+				.minPixelProcessingTime = 1.0us / 380,
 				.dataBufferStrided = false,
 			}
 		},
