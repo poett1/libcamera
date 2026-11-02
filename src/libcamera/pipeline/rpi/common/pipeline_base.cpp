@@ -8,6 +8,7 @@
 #include "pipeline_base.h"
 
 #include <chrono>
+#include <optional>
 
 #include <linux/media-bus-format.h>
 #include <linux/videodev2.h>
@@ -33,16 +34,22 @@ LOG_DEFINE_CATEGORY(RPI)
 
 using StreamFlag = RPi::Stream::StreamFlag;
 
+/*
+ * The IPA's algorithms will not be called more often than this many
+ * microseconds. The default corresponds to 30fps.
+ */
+constexpr float defaultControllerMinimumFrameDurationUs = 1000000.0 / 30.0;
+
 namespace {
 
 constexpr unsigned int defaultRawBitDepth = 12;
 
-PixelFormat mbusCodeToPixelFormat(unsigned int code,
-				  BayerFormat::Packing packingReq)
+std::optional<PixelFormat>
+mbusCodeToPixelFormat(unsigned int code, BayerFormat::Packing packingReq)
 {
 	BayerFormat bayer = BayerFormat::fromMbusCode(code);
-
-	ASSERT(bayer.isValid());
+	if (!bayer.isValid())
+		return std::nullopt;
 
 	bayer.packing = packingReq;
 	PixelFormat pix = bayer.toPixelFormat();
@@ -56,6 +63,9 @@ PixelFormat mbusCodeToPixelFormat(unsigned int code,
 		bayer.packing = BayerFormat::Packing::None;
 		pix = bayer.toPixelFormat();
 	}
+
+	if (!pix.isValid())
+		return std::nullopt;
 
 	return pix;
 }
@@ -372,10 +382,12 @@ V4L2DeviceFormat PipelineHandlerBase::toV4L2DeviceFormat(const V4L2VideoDevice *
 							 BayerFormat::Packing packingReq)
 {
 	unsigned int code = format.code;
-	const PixelFormat pix = mbusCodeToPixelFormat(code, packingReq);
 	V4L2DeviceFormat deviceFormat;
 
-	deviceFormat.fourcc = dev->toV4L2PixelFormat(pix);
+	const std::optional<PixelFormat> pix = mbusCodeToPixelFormat(code, packingReq);
+	ASSERT(pix.has_value());
+
+	deviceFormat.fourcc = dev->toV4L2PixelFormat(*pix);
 	deviceFormat.size = format.size;
 	deviceFormat.colorSpace = format.colorSpace;
 	return deviceFormat;
@@ -389,7 +401,7 @@ PipelineHandlerBase::generateConfiguration(Camera *camera, Span<const StreamRole
 		std::make_unique<RPiCameraConfiguration>(data);
 	V4L2SubdeviceFormat sensorFormat;
 	unsigned int bufferCount;
-	PixelFormat pixelFormat;
+	std::optional<PixelFormat> pixelFormat;
 	V4L2VideoDevice::Formats fmts;
 	Size size;
 	std::optional<ColorSpace> colorSpace;
@@ -405,7 +417,7 @@ PipelineHandlerBase::generateConfiguration(Camera *camera, Span<const StreamRole
 			sensorFormat = data->findBestFormat(size, defaultRawBitDepth);
 			pixelFormat = mbusCodeToPixelFormat(sensorFormat.code,
 							    BayerFormat::Packing::CSI2);
-			ASSERT(pixelFormat.isValid());
+			ASSERT(pixelFormat.has_value());
 			colorSpace = ColorSpace::Raw;
 			bufferCount = 2;
 			break;
@@ -462,10 +474,10 @@ PipelineHandlerBase::generateConfiguration(Camera *camera, Span<const StreamRole
 		if (role == StreamRole::Raw) {
 			/* Translate the MBUS codes to a PixelFormat. */
 			for (const auto &format : data->sensorFormats_) {
-				PixelFormat pf = mbusCodeToPixelFormat(format.first,
-								       BayerFormat::Packing::CSI2);
-				if (pf.isValid())
-					deviceFormats.emplace(std::piecewise_construct, std::forward_as_tuple(pf),
+				std::optional<PixelFormat> pf = mbusCodeToPixelFormat(format.first,
+										      BayerFormat::Packing::CSI2);
+				if (pf.has_value())
+					deviceFormats.emplace(std::piecewise_construct, std::forward_as_tuple(*pf),
 							      std::forward_as_tuple(format.second.begin(), format.second.end()));
 			}
 		} else {
@@ -492,7 +504,7 @@ PipelineHandlerBase::generateConfiguration(Camera *camera, Span<const StreamRole
 		StreamFormats formats(deviceFormats);
 		StreamConfiguration cfg(formats);
 		cfg.size = size;
-		cfg.pixelFormat = pixelFormat;
+		cfg.pixelFormat = *pixelFormat;
 		cfg.colorSpace = colorSpace;
 		cfg.bufferCount = bufferCount;
 		config->addConfiguration(cfg);
@@ -800,6 +812,12 @@ int PipelineHandlerBase::registerCamera(std::unique_ptr<RPi::CameraData> &camera
 	if (!data->sensor_)
 		return -EINVAL;
 
+	ret = data->loadPipelineConfiguration();
+	if (ret) {
+		LOG(RPI, Error) << "Unable to load pipeline configuration";
+		return ret;
+	}
+
 	/* Populate the map of sensor supported formats and sizes. */
 	for (auto const mbusCode : data->sensor_->mbusCodes())
 		data->sensorFormats_.emplace(mbusCode,
@@ -859,18 +877,23 @@ int PipelineHandlerBase::registerCamera(std::unique_ptr<RPi::CameraData> &camera
 	if (ret)
 		return ret;
 
-	ret = data->loadPipelineConfiguration();
-	if (ret) {
-		LOG(RPI, Error) << "Unable to load pipeline configuration";
-		return ret;
-	}
-
 	/* Setup the general IPA signal handlers. */
 	data->frontendDevice()->dequeueTimeout.connect(data, &RPi::CameraData::cameraTimeout);
 	data->frontendDevice()->frameStart.connect(data, &RPi::CameraData::frameStarted);
 	data->ipa_->setDelayedControls.connect(data, &CameraData::setDelayedControls);
 	data->ipa_->setLensControls.connect(data, &CameraData::setLensControls);
 	data->ipa_->metadataReady.connect(data, &CameraData::metadataReady);
+
+	/*
+	 * Disable the IPA signal to control timeout, when there is a
+	 * user-requested value. We do this here now that the IPA and
+	 * front end device are both initialized. 0 is a valid request
+	 * (infinite timeout), so test against the -1 "no override" default.
+	 */
+	if (data->config_.cameraTimeoutValue >= 0) {
+		data->ipa_->setCameraTimeout.disconnect();
+		data->frontendDevice()->setDequeueTimeout(data->config_.cameraTimeoutValue * 1ms);
+	}
 
 	return 0;
 }
@@ -941,13 +964,16 @@ V4L2SubdeviceFormat CameraData::findBestFormat(const Size &req, unsigned int bit
 	constexpr float penaltyBitDepth = 500.0;
 
 	/* Calculate the closest/best mode from the user requested size. */
-	for (const auto &iter : sensorFormats_) {
-		const unsigned int mbusCode = iter.first;
-		const PixelFormat format = mbusCodeToPixelFormat(mbusCode,
-								 BayerFormat::Packing::None);
-		const PixelFormatInfo &info = PixelFormatInfo::info(format);
+	for (const auto &[mbusCode, sizes] : sensorFormats_) {
+		const std::optional<PixelFormat> format =
+			mbusCodeToPixelFormat(mbusCode, BayerFormat::Packing::None);
 
-		for (const Size &size : iter.second) {
+		if (!format.has_value())
+			continue;
+
+		const PixelFormatInfo &info = PixelFormatInfo::info(*format);
+
+		for (const Size &size : sizes) {
 			double reqAr = static_cast<double>(req.width) / req.height;
 			double fmtAr = static_cast<double>(size.width) / size.height;
 
@@ -966,7 +992,7 @@ V4L2SubdeviceFormat CameraData::findBestFormat(const Size &req, unsigned int bit
 			}
 
 			LOG(RPI, Debug) << "Format: " << size
-					<< " fmt " << format
+					<< " fmt " << *format
 					<< " Score: " << score
 					<< " (best " << bestScore << ")";
 		}
@@ -1100,7 +1126,10 @@ int CameraData::loadPipelineConfiguration()
 	 * pipeline config file overrides it; 0 means an infinite timeout
 	 * (disables the watchdog, e.g. for externally triggered sensors).
 	 */
-	config_.cameraTimeoutValue = -1;
+	config_ = {
+		.cameraTimeoutValue = -1,
+		.controllerMinFrameDurationUs = defaultControllerMinimumFrameDurationUs,
+	};
 
 	/* Initial configuration of the platform, in case no config file is present */
 	platformPipelineConfigure({});
@@ -1143,11 +1172,8 @@ int CameraData::loadPipelineConfiguration()
 	config_.cameraTimeoutValue =
 		phConfig["camera_timeout_value_ms"].get<int>(config_.cameraTimeoutValue);
 
-	if (config_.cameraTimeoutValue >= 0) {
-		/* Disable the IPA signal to control timeout and set the user requested value. */
-		ipa_->setCameraTimeout.disconnect();
-		frontendDevice()->setDequeueTimeout(config_.cameraTimeoutValue * 1ms);
-	}
+	config_.controllerMinFrameDurationUs =
+		phConfig["controller_min_frame_duration_us"].get<double>(config_.controllerMinFrameDurationUs);
 
 	return platformPipelineConfigure(root);
 }
@@ -1177,6 +1203,8 @@ int CameraData::loadIPA(ipa::RPi::InitResult *result)
 	}
 
 	params.lensPresent = !!sensor_->focusLens();
+	params.controllerMinFrameDurationUs = config_.controllerMinFrameDurationUs;
+
 	ret = platformInitIpa(params);
 	if (ret)
 		return ret;
@@ -1518,6 +1546,55 @@ void CameraData::fillRequestMetadata(const ControlList &bufferControls, Request 
 						      Span<const Rectangle>(crops.data(),
 									    crops.size()));
 		}
+	}
+}
+
+static bool isControlDelayed(unsigned int id)
+{
+	return id == controls::ExposureTime ||
+	       id == controls::AnalogueGain ||
+	       id == controls::FrameDurationLimits ||
+	       id == controls::AeEnable ||
+	       id == controls::ExposureTimeMode ||
+	       id == controls::AnalogueGainMode;
+}
+
+void CameraData::handleControlLists(uint32_t delayContext, ControlList &paramControls)
+{
+	/*
+	 * The delayContext is the sequence number after it's gone through the various
+	 * pipeline delays, so that's what gets reported as the "ControlListSequence"
+	 * in the metadata, being the sequence number of the request whose ControlList
+	 * has just been applied.
+	 */
+	Request *request = requestQueue_.front();
+	request->_d()->metadata().set(controls::rpi::ControlListSequence, delayContext);
+
+	/*
+	 * Controls that take effect immediately (typically ISP controls) have to be
+	 * delayed so as to synchronise with those controls that do get delayed. So we
+	 * must remove them from the current request, and push them onto a queue so
+	 * that they can be used later.
+	 *
+	 * Note that we are given a separate control list (paramControls) so that
+	 * we can pass back the controls that really need to happen now, without
+	 * disturbing the controls that were submitted with the request.
+	 */
+	ASSERT(paramControls.empty());
+	immediateControls_.push({ request->sequence(), {} });
+	for (const auto &ctrl : request->controls()) {
+		if (isControlDelayed(ctrl.first))
+			paramControls.set(ctrl.first, ctrl.second);
+		else
+			immediateControls_.back().controls.set(ctrl.first, ctrl.second);
+	}
+
+	/* "Immediate" controls that have become due are now merged back into this request. */
+	while (!immediateControls_.empty() &&
+	       immediateControls_.front().controlListId <= delayContext) {
+		paramControls.merge(immediateControls_.front().controls,
+				    ControlList::MergePolicy::OverwriteExisting);
+		immediateControls_.pop();
 	}
 }
 

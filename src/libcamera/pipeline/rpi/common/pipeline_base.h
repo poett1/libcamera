@@ -171,15 +171,29 @@ public:
 		 * means an infinite timeout (watchdog disabled).
 		 */
 		int cameraTimeoutValue;
+		/*
+		 * The minimum frame duration between the IPA's calls to the
+		 * algorithms themselves (in microseconds).
+		 */
+		float controllerMinFrameDurationUs;
 	};
 
 	Config config_;
 
 	ClockRecovery wallClockRecovery_;
 
+	struct ImmediateControlsEntry {
+		uint64_t controlListId;
+		ControlList controls;
+	};
+	std::queue<ImmediateControlsEntry> immediateControls_;
+
 protected:
 	void fillRequestMetadata(const ControlList &bufferControls,
 				 Request *request);
+
+	void handleControlLists(uint32_t delayContext,
+				ControlList &paramControls);
 
 	virtual void tryRunPipeline() = 0;
 
